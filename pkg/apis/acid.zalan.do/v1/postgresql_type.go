@@ -60,6 +60,7 @@ type PostgresSpec struct {
 	LogicalBackupSchedule string               `json:"logicalBackupSchedule,omitempty"`
 	StandbyCluster        *StandbyDescription  `json:"standby"`
 	PodAnnotations        map[string]string    `json:"podAnnotations"`
+	PGBouncer             *PGBouncer           `json:"pgBouncer,omitempty"`
 
 	// deprecated json tags
 	InitContainersOld       []v1.Container `json:"init_containers,omitempty"`
@@ -152,4 +153,14 @@ type UserFlags []string
 // PostgresStatus contains status of the PostgreSQL cluster (running, creation failed etc.)
 type PostgresStatus struct {
 	PostgresClusterStatus string `json:"PostgresClusterStatus"`
+}
+
+// PGBouncer defines the PGBouncer connection pooler deployment that will front the master
+type PGBouncer struct {
+	Resources           `json:"resources,omitempty"`
+	Name                string `json:"name,omitempty"`
+	DockerImage         string `json:"image,omitempty"`
+	DatabasesIniSection string `json:"databasesIniSection,omitempty"`
+	UsersIniSection     string `json:"usersIniSection,omitempty"`
+	PGBouncerIniSection string `json:"pgbouncerIniSection,omitempty"`
 }
