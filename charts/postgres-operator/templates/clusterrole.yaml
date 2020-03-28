@@ -31,7 +31,9 @@ rules:
   resources:
   - configmaps
   verbs:
+  - create
   - get
+  - delete
 - apiGroups:
   - ""
   resources:
@@ -106,6 +108,7 @@ rules:
   - apps
   resources:
   - statefulsets
+  - deployments
   verbs:
   - create
   - delete

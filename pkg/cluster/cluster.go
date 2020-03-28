@@ -53,6 +53,9 @@ type kubeResources struct {
 	Endpoints           map[PostgresRole]*v1.Endpoints
 	Secrets             map[types.UID]*v1.Secret
 	Statefulset         *appsv1.StatefulSet
+	PGBouncerConfigMap  *v1.ConfigMap
+	PGBouncerDeployment *appsv1.Deployment
+	PGBouncerService    *v1.Service
 	PodDisruptionBudget *policybeta1.PodDisruptionBudget
 	//Pods are treated separately
 	//PVCs are treated separately
@@ -292,6 +295,17 @@ func (c *Cluster) Create() error {
 	}
 	c.logger.Infof("pods are ready")
 
+	if c.Spec.PGBouncer != nil {
+		pgbDeployment, pgbService, pgbConfigMap, err := c.createPGBouncerObjects()
+		if err != nil {
+			return fmt.Errorf("could not create pgbouncer objects: %v", err)
+		}
+		c.logger.Infof("pgbouncer config map %q has been successfully created", util.NameFromMeta(pgbConfigMap.ObjectMeta))
+		c.logger.Infof("pgbouncer deployment %q has been successfully created", util.NameFromMeta(pgbDeployment.ObjectMeta))
+		c.logger.Infof("pgbouncer service %q has been successfully created", util.NameFromMeta(pgbService.ObjectMeta))
+	} else {
+		c.logger.Infof("no pgbouncer in the config for this cluster")
+	}
 	// create database objects unless we are running without pods or disabled that feature explicitly
 	if !(c.databaseAccessDisabled() || c.getNumberOfInstances(&c.Spec) <= 0 || c.Spec.StandbyCluster != nil) {
 		if err = c.createRoles(); err != nil {
@@ -714,10 +728,14 @@ func (c *Cluster) Delete() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if err := c.deletePGBouncerObjects(); err != nil {
+		c.logger.Warningf("could not remove the pgbouncer object: %v", err)
+	}
+
 	// delete the backup job before the stateful set of the cluster to prevent connections to non-existing pods
 	// deleting the cron job also removes pods and batch jobs it created
 	if err := c.deleteLogicalBackupJob(); err != nil {
-		c.logger.Warningf("could not remove the logical backup k8s cron job; %v", err)
+		c.logger.Warningf("could not remove the logical backup k8s cron job: %v", err)
 	}
 
 	if err := c.deleteStatefulSet(); err != nil {
@@ -750,7 +768,7 @@ func (c *Cluster) Delete() {
 	}
 
 	if err := c.deletePatroniClusterObjects(); err != nil {
-		c.logger.Warningf("could not remove leftover patroni objects; %v", err)
+		c.logger.Warningf("could not remove leftover patroni objects: %v", err)
 	}
 
 }

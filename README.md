@@ -1,3 +1,61 @@
+# PGBouncer enhancement
+
+This PR is for the addition of a PGBouncer connection pooler to the Zalando Postgres Operator.  It creates a new PGBouncer deployment, service and configmap.  PGBouncer then serves as the cluster's frontend and forwards queries to the master Postgres service.
+
+This task was one of the milestones for the Postgres Operator's 1.4 release.  Before I was able to submit this work to the project, the Zalando team had already implemented this feature themselves.
+
+While this implementation performed robustly and correctly, it regrettably isn't as polished as I'd like to make it.  I leave it here for posterity.
+
+## Design choices
+One goal of this work was to contribute it upstream.  As such it needed to both be useful to my specific use case and environment, but generic enough to be easily used by others.
+
+#### PGBouncer is configurable per cluster
+The PGBouncer config is done in the Postgres YAML manifest, not in the configuration for the operator itself.  This supports the use case where you may have one operator deployment which manages multiple Postgres clusters and not all of them want a PGBouncer.  It adds more flexibility.
+
+#### Bring your own PGBouncer image - or use Spilo
+You can specify a custom PGBouncer container image.  The defaults are to use the Spilo image itself, so that the project remains self-contained for simplicity.  If you prefer a smaller, more specialized image for PGBouncer it is simple to configure.
+
+#### PGBouncer config with cluster config
+Arbitrary config directives can be passed to PGBouncer via the Postgres cluster manifest.  This makes the manifest the single place to configure the Postgres cluster and PGBouncer.  The config is broken into three peices that correspond to the sections in the pgbouncer.ini file.  This eliminates the need to create and maintain a map of all possible PGBouncer directives.  The pgbouncer.ini file is assembled from these Postgres manifest parameters and combined with dynamic content (the name of the Postgres cluster's master service).
+This config and the userlist file are injected into the PGBouncer container as a volume mount.
+
+#### Postgres superuser access
+PGBouncer is configured to access Postgres via the superuser account to perform user authentication.  This was quick to implement but it isn't very secure.  The superuser should be used as little as possible.  I had future plans to use a Security Definer function to look up user credentials so an unpriveleged Postgres user can be used.  This is exactly what the Zalando implementation does.
+
+## Configuration
+In the Postgres cluster manifest, there is now a new section called `pgbouncer`.  These parameters are grouped directly under the spec key in the manifest.
+
+**image**
+Optional PGBouncer container image path
+
+**pgbouncerIniSection**
+The `[pgbouncer]` section of the pgbouncer.ini file
+**usersIniSection**
+The `[users]` section of the pgbouncer.ini file
+**databasesIniSection**
+The `[databases]` section of the pgbouncer.ini file
+
+#### Example
+```yaml
+spec:
+  pgbouncer:
+    image: pgbouncer/pgbouncer:1.12.0
+    pgbouncerIniSection: |
+      min_pool_size = 50
+    usersIniSection: |
+      # Existing users
+      karl md5f47636673b14c54021a69dc06f6a19fb
+    databasesIniSection: |
+      # Our old DB
+      legacydb = host=legacy.example.com port=5432
+```
+### Thank you and kudos to the Zalando team and all the contributors for making such a great project!
+For reference, the official/merged PR for the PGBouncer enhancement is [PR #799](https://github.com/zalando/postgres-operator/pull/799/)
+
+-Derek
+
+---
+
 # Postgres Operator
 
 [![Build Status](https://travis-ci.org/zalando/postgres-operator.svg?branch=master)](https://travis-ci.org/zalando/postgres-operator)

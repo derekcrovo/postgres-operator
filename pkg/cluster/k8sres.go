@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -986,6 +988,131 @@ func (c *Cluster) generatePodAnnotations(spec *acidv1.PostgresSpec) map[string]s
 	}
 
 	return annotations
+}
+
+func (c *Cluster) generatePGBouncerConfig() (*v1.ConfigMap, error) {
+	iniFile := `[databases]
+* = host=%s port=5432
+%s
+[users]
+%s
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 5432
+auth_type = md5
+auth_file = /etc/pgbouncer/userlist.txt
+auth_user= postgres
+admin_users = postgres
+%s
+`
+	// XXX c.serviceName(Master)
+	masterService := fmt.Sprintf("%s.%s.svc.%s", c.GetServiceMaster().Name, c.Namespace, c.OpConfig.ClusterDomain)
+	iniFile = fmt.Sprintf(iniFile, masterService, c.Spec.PGBouncer.DatabasesIniSection, c.Spec.PGBouncer.UsersIniSection, c.Spec.PGBouncer.PGBouncerIniSection)
+	hash := md5.Sum([]byte(c.systemUsers[constants.SuperuserKeyName].Password + c.systemUsers[constants.SuperuserKeyName].Name))
+	md5 := hex.EncodeToString(hash[:])
+	userList := fmt.Sprintf(`"%s" "md5%s"`, c.systemUsers[constants.SuperuserKeyName].Name, md5)
+	cmName := fmt.Sprintf("%s-pgbouncer-config", c.Name)
+	data := make(map[string]string)
+	data["pgbouncer.ini"] = iniFile
+	data["userlist.txt"] = userList
+	cm := v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: c.Namespace,
+		},
+		Data: data,
+	}
+	return &cm, nil
+}
+
+func (c *Cluster) generatePGBouncerDeployment() (*appsv1.Deployment, error) {
+	lbls := map[string]string{
+		"application": "pgbouncer",
+		"version":     c.Name,
+	}
+	selector := &metav1.LabelSelector{MatchLabels: lbls, MatchExpressions: nil}
+	replicas := int32(1)
+	name := fmt.Sprintf("%s-pgbouncer", c.Name)
+	// XXX factor this out
+	bouncerConfigName := fmt.Sprintf("%s-pgbouncer-config", c.Name)
+	cmvs := v1.ConfigMapVolumeSource{
+		LocalObjectReference: v1.LocalObjectReference{
+			Name: bouncerConfigName,
+		},
+	}
+	// These are the values for the postgres user in the Spilo container
+	uid := int64(101)
+	gid := int64(103)
+	secContext := v1.PodSecurityContext{
+		RunAsUser:  &uid,
+		RunAsGroup: &gid,
+	}
+	effectiveDockerImage := util.Coalesce(c.Spec.DockerImage, c.OpConfig.DockerImage)
+	effectiveDockerImage = util.Coalesce(c.Spec.PGBouncer.DockerImage, effectiveDockerImage)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: c.Namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: selector,
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: c.Namespace,
+					Labels:    lbls,
+				},
+				Spec: v1.PodSpec{
+					Volumes: []v1.Volume{
+						v1.Volume{
+							Name: bouncerConfigName,
+							VolumeSource: v1.VolumeSource{
+								ConfigMap: &cmvs,
+							},
+						},
+					},
+					SecurityContext: &secContext,
+					Containers: []v1.Container{
+						v1.Container{
+							Name:    name,
+							Image:   effectiveDockerImage,
+							Command: []string{"/usr/sbin/pgbouncer"},
+							Args:    []string{"/etc/pgbouncer/pgbouncer.ini"},
+							VolumeMounts: []v1.VolumeMount{
+								v1.VolumeMount{
+									Name:      bouncerConfigName,
+									MountPath: "/etc/pgbouncer",
+								},
+							},
+						},
+					},
+					ServiceAccountName: c.OpConfig.PodServiceAccountName,
+				},
+			},
+		},
+	}
+	return deployment, nil
+}
+
+func (c *Cluster) generatePGBouncerService() (*v1.Service, error) {
+	lbls := map[string]string{
+		"application": "pgbouncer",
+		"version":     c.Name,
+	}
+	name := fmt.Sprintf("%s-pgbouncer", c.Spec.TeamID)
+	service := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: c.Namespace,
+			Labels:    lbls,
+		},
+		Spec: v1.ServiceSpec{
+			Selector: lbls,
+			Ports:    []v1.ServicePort{{Name: "postgresql", Port: 5432, TargetPort: intstr.IntOrString{IntVal: 5432}}},
+			Type:     v1.ServiceTypeClusterIP,
+		},
+	}
+	return service, nil
 }
 
 func generateScalyrSidecarSpec(clusterName, APIKey, serverURL, dockerImage string,

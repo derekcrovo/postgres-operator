@@ -30,6 +30,10 @@ func (c *Cluster) listResources() error {
 		c.logger.Infof("found statefulset: %q (uid: %q)", util.NameFromMeta(c.Statefulset.ObjectMeta), c.Statefulset.UID)
 	}
 
+	if c.PGBouncerDeployment != nil {
+		c.logger.Infof("found pgbouncer deployment: %q (uid: %q)", util.NameFromMeta(c.PGBouncerDeployment.ObjectMeta), c.PGBouncerDeployment.UID)
+	}
+
 	for _, obj := range c.Secrets {
 		c.logger.Infof("found secret: %q (uid: %q)", util.NameFromMeta(obj.ObjectMeta), obj.UID)
 	}
@@ -88,6 +92,43 @@ func (c *Cluster) createStatefulSet() (*appsv1.StatefulSet, error) {
 	c.logger.Debugf("created new statefulset %q, uid: %q", util.NameFromMeta(statefulSet.ObjectMeta), statefulSet.UID)
 
 	return statefulSet, nil
+}
+
+func (c *Cluster) createPGBouncerObjects() (*appsv1.Deployment, *v1.Service, *v1.ConfigMap, error) {
+	c.setProcessName("creating pgbouncer objects")
+	configMapSpec, err := c.generatePGBouncerConfig()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("could not generate pgbouncer config map: %v", err)
+	}
+	configMap, err := c.KubeClient.ConfigMaps(configMapSpec.Namespace).Create(configMapSpec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	c.PGBouncerConfigMap = configMap
+	c.logger.Debugf("created new pgbouncer config map %q, uid: %q", util.NameFromMeta(configMap.ObjectMeta), configMap.UID)
+
+	deploymentSpec, err := c.generatePGBouncerDeployment()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("could not generate pgbouncer deployment: %v", err)
+	}
+	deployment, err := c.KubeClient.Deployments(deploymentSpec.Namespace).Create(deploymentSpec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	c.PGBouncerDeployment = deployment
+	c.logger.Debugf("created new pgbouncer deployment %q, uid: %q", util.NameFromMeta(deployment.ObjectMeta), deployment.UID)
+
+	serviceSpec, err := c.generatePGBouncerService()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("could not generate pgbouncer service: %v", err)
+	}
+	service, err := c.KubeClient.Services(serviceSpec.Namespace).Create(serviceSpec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	c.PGBouncerService = service
+	c.logger.Debugf("created new pgbouncer service %q, uid: %q", util.NameFromMeta(service.ObjectMeta), service.UID)
+	return deployment, service, configMap, nil
 }
 
 func getPodIndex(podName string) (int32, error) {
@@ -349,6 +390,44 @@ func (c *Cluster) deleteStatefulSet() error {
 		return fmt.Errorf("could not delete PersistentVolumeClaims: %v", err)
 	}
 
+	return nil
+}
+
+func (c *Cluster) deletePGBouncerObjects() error {
+	c.setProcessName("deleting pgbouncer objects")
+	c.logger.Debugln("deleting pgbouncer objects")
+	if c.PGBouncerConfigMap != nil {
+		err := c.KubeClient.ConfigMaps(c.PGBouncerConfigMap.Namespace).Delete(c.PGBouncerConfigMap.Name, c.deleteOptions)
+		if err != nil {
+			c.logger.Errorf("could not delete pgbouncer config map: %v", err)
+		}
+		c.logger.Infof("pgbouncer config map %q has been deleted", util.NameFromMeta(c.PGBouncerConfigMap.ObjectMeta))
+	} else {
+		c.logger.Debugln("c.PGBouncerConfigMap is nil")
+	}
+	if c.PGBouncerDeployment != nil {
+		// XXX Do we need our own or can we use c.deleteOptions ?
+		deletePolicy := metav1.DeletePropagationForeground
+		deleteOptions := &metav1.DeleteOptions{
+			PropagationPolicy: &deletePolicy,
+		}
+		err := c.KubeClient.Deployments(c.PGBouncerDeployment.Namespace).Delete(c.PGBouncerDeployment.Name, deleteOptions)
+		if err != nil {
+			c.logger.Errorf("could not delete pgbouncer deployment: %v", err)
+		}
+		c.logger.Infof("pgbouncer deployment %q has been deleted", util.NameFromMeta(c.PGBouncerDeployment.ObjectMeta))
+	} else {
+		c.logger.Debugln("c.PGBouncerDeployment is nil")
+	}
+	if c.PGBouncerService != nil {
+		err := c.KubeClient.Services(c.PGBouncerService.Namespace).Delete(c.PGBouncerService.Name, c.deleteOptions)
+		if err != nil {
+			c.logger.Errorf("could not delete pgbouncer service: %v", err)
+		}
+		c.logger.Infof("pgbouncer service %q has been deleted", util.NameFromMeta(c.PGBouncerService.ObjectMeta))
+	} else {
+		c.logger.Debugln("c.PGBouncerService is nil")
+	}
 	return nil
 }
 
@@ -707,7 +786,7 @@ func (c *Cluster) GetEndpointMaster() *v1.Endpoints {
 	return c.Endpoints[Master]
 }
 
-// GetEndpointReplica returns cluster's kubernetes master Endpoint
+// GetEndpointReplica returns cluster's kubernetes replica Endpoint
 func (c *Cluster) GetEndpointReplica() *v1.Endpoints {
 	return c.Endpoints[Replica]
 }
